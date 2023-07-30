@@ -19,11 +19,17 @@ public class SchemaValidator {
     public void validateSchema(JSONObject data) throws ValidationException {
         logger.info("SCHEMA VALIDATING: schema path-" + jsonPath + ": data-" + data.toString());
 
-        InputStream inputStream = getClass().getResourceAsStream(jsonPath);
-        JSONObject schemaJson = new JSONObject(new JSONTokener(inputStream));
-        Schema schema = SchemaLoader.load(schemaJson);
+        try {
+            InputStream inputStream = getClass().getResourceAsStream(jsonPath);
+            JSONObject schemaJson = new JSONObject(new JSONTokener(inputStream));
+            Schema schema = SchemaLoader.load(schemaJson);
 
-        schema.validate(data);
+            schema.validate(data);
+        } catch (ValidationException e) {
+            logger.error("Schema validation failed: " + e.getMessage());
+            // You can handle the validation error here or rethrow the exception
+            throw e;
+        }
     }
 
 }
