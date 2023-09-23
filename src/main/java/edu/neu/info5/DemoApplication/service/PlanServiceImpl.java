@@ -2,6 +2,7 @@ package edu.neu.info5.DemoApplication.service;
 
 import edu.neu.info5.DemoApplication.dao.RedisDaoImpl;
 import edu.neu.info5.DemoApplication.validator.SchemaValidator;
+import edu.neu.info5.DemoApplication.service.ETagService;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.json.simple.parser.JSONParser;
@@ -10,6 +11,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+
+
+
+
+import redis.clients.jedis.Jedis;
 
 import java.util.*;
 
@@ -26,6 +32,9 @@ public class PlanServiceImpl implements PlanService{
     private RedisDaoImpl redisDao;
     @Autowired
     private EncryptionService encryptionService;
+
+    public PlanServiceImpl() {
+    }
 
     @Override
     public void createPlan(String key, String value) {

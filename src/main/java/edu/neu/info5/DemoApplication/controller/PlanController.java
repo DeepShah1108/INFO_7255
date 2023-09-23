@@ -1,8 +1,9 @@
 package edu.neu.info5.DemoApplication.controller;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
+import edu.neu.info5.DemoApplication.DemoApplication;
 import edu.neu.info5.DemoApplication.service.AuthService;
 import edu.neu.info5.DemoApplication.service.EncryptionService;
 import edu.neu.info5.DemoApplication.service.PlanService;
@@ -11,12 +12,15 @@ import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
+import java.io.IOException;
 import java.util.*;
 
 @RestController
@@ -32,6 +36,12 @@ public class PlanController {
     private EncryptionService encryptionService;
     @Autowired
     private AuthService authService;
+
+    private RabbitTemplate rabbitTemplate;
+
+    public PlanController(RabbitTemplate rabbitTemplate) {
+        this.rabbitTemplate = rabbitTemplate;
+    }
 
     @GetMapping("/")
     public String hello() {
@@ -81,6 +91,15 @@ public class PlanController {
 
         logger.info("CREATING NEW DATA: key - " + internalKey + ": json - " + newPlan.toString());
         planService.savePlan(internalKey, newPlan);
+
+        // Send a message to queue for indexing
+        Map<String, String> message = new HashMap<>();
+        message.put("operation", "SAVE");
+        message.put("body", reqJson);
+
+        System.out.println("Sending message: " + message);
+        rabbitTemplate.convertAndSend(DemoApplication.queueName, message);
+
         String res = "{ObjectId: " + newPlan.get("objectId") + ", ObjectType: " + newPlan.get("objectType") + "}";
 
         return ResponseEntity.status(HttpStatus.CREATED).header("ETag",encryptionService.encrypt(newPlan.toString())).body(new JSONObject(res).toString());
@@ -112,6 +131,15 @@ public class PlanController {
 
             return new ResponseEntity<>(new JSONObject().put("message", "No Data Found").toString(), HttpStatus.NOT_FOUND);
         }
+
+        // Send message to queue for deleting indices
+        Map<String, Object> plan = planService.getPlan(intervalKey);
+        Map<String, String> message = new HashMap<>();
+        message.put("operation", "DELETE");
+        message.put("body",  new JSONObject(plan).toString());
+
+        System.out.println("Sending message: " + message);
+        rabbitTemplate.convertAndSend(DemoApplication.queueName, message);
 
         planService.delete(intervalKey);
 
@@ -213,20 +241,45 @@ public class PlanController {
             return new ResponseEntity<>(new JSONObject().put("message", "eTag not provided").toString(), HttpStatus.BAD_REQUEST);
         }
 
-        if(ifMatch.equals(planEtag)) {
-            planService.delete(intervalKey);
-
-            JSONObject putNewPlan = new JSONObject(reqJson);
-
-            planService.savePlan(intervalKey, putNewPlan);
-            logger.info("PUT PLAN: " + intervalKey + " updates successfully");
-
-            return ResponseEntity.status(HttpStatus.OK).header("ETag",encryptionService.encrypt(putNewPlan.toString()))
-                    .body(new JSONObject().put("message", "Updated Successfully").toString());
-
-        } else {
+        if(!ifMatch.equals(planEtag)) {
             return new ResponseEntity<>(new JSONObject().put("message", "Etag does not match").toString(), HttpStatus.PRECONDITION_FAILED);
         }
+
+        // Send message to queue for deleting previous indices incase of put
+        Map<String, Object> oldPlan = planService.getPlan(intervalKey);
+        Map<String, String> message = new HashMap<>();
+        message.put("operation", "DELETE");
+        message.put("body", new JSONObject(oldPlan).toString());
+
+        System.out.println("Sending message: " + message);
+        rabbitTemplate.convertAndSend(DemoApplication.queueName, message);
+
+        planService.delete(intervalKey);
+
+        JSONObject putNewPlan = new JSONObject(reqJson);
+        try {
+            logger.info(reqJson);
+            planSchema.validateSchema(putNewPlan);
+        } catch(Exception e) {
+            logger.info("VALIDATING ERROR: SCHEMA NOT MATCH - " + e.getMessage());
+            return ResponseEntity.badRequest().body(e.getMessage());
+        }
+
+        planService.savePlan(intervalKey, putNewPlan);
+
+        // Send message to queue for index update
+        Map<String, Object> newPutPlan = planService.getPlan(intervalKey);
+        message = new HashMap<>();
+        message.put("operation", "SAVE");
+        message.put("body", new JSONObject(newPutPlan).toString());
+
+        System.out.println("Sending message: " + message);
+        rabbitTemplate.convertAndSend(DemoApplication.queueName, message);
+
+        logger.info("PUT PLAN: " + intervalKey + " updates successfully");
+
+        return ResponseEntity.status(HttpStatus.OK).header("ETag",encryptionService.encrypt(putNewPlan.toString()))
+                .body(new JSONObject().put("message", "Updated Successfully").toString());
 
     }
 
@@ -235,7 +288,7 @@ public class PlanController {
                                             @PathVariable String id,
                                             @RequestHeader(value = "Authorization") String idToken,
                                             @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) String ifMatch,
-                                            @RequestBody String reqJson) {
+                                            @RequestBody(required = false) String reqJson) {
 
         logger.info("PATCHING PLAN: " + object + ":" + id);
 
@@ -271,18 +324,24 @@ public class PlanController {
             return new ResponseEntity<>(new JSONObject().put("message", "eTag not provided").toString(), HttpStatus.BAD_REQUEST);
         }
 
-        if(ifMatch.equals(planEtag)) {
-
-            JSONObject patchNewPlan = new JSONObject(reqJson);
-
-            planService.update(intervalKey, patchNewPlan);
-
-            logger.info("PATCH PLAN : " + intervalKey + " updates successfully");
-            return ResponseEntity.status(HttpStatus.OK).header("ETag",encryptionService.encrypt(planEtag.toString()))
-                    .body(new JSONObject().put("message", "Updated Successfully").toString());
-
-        } else {
+        if(!ifMatch.equals(planEtag)) {
             return new ResponseEntity<>(new JSONObject().put("message", "Etag does not match").toString(), HttpStatus.PRECONDITION_FAILED);
         }
+
+        JSONObject patchNewPlan = new JSONObject(reqJson);
+
+        planService.update(intervalKey, patchNewPlan);
+
+        // Send message to queue for index update
+        Map<String, String> message = new HashMap<>();
+        message.put("operation", "SAVE");
+        message.put("body", reqJson);
+
+        System.out.println("Sending message: " + message);
+        rabbitTemplate.convertAndSend(DemoApplication.queueName, message);
+
+        logger.info("PATCH PLAN : " + intervalKey + " updates successfully");
+        return ResponseEntity.status(HttpStatus.OK).header("ETag",encryptionService.encrypt(patchNewPlan.toString()))
+                .body(new JSONObject().put("message", "Updated Successfully").toString());
     }
 }
